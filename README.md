@@ -11,11 +11,13 @@ A privacy-focused Flutter clipboard plugin designed to eliminate intrusive iOS 1
 
 ## Features
 
-- **Zero-Prompt Preflight (iOS)**: Checks `UIPasteboard.general.hasStrings` and `changeCount` without triggering any iOS privacy authorization alerts.
-- **Safe Reading**: Prompts user permission only when a new copy action is detected outside the app. Automatically persists the `changeCount` so subsequent launches remain prompt-free.
-- **Clipboard Clearing**: Clear clipboard securely once links/content have been consumed by landing pages.
-- **Single Responsibility**: Lightweight, clean architecture without third-party deep-link SDK dependencies.
-- **Race Condition Dispatcher Guide**: Ready-to-use business template for handling 3-second timeout race conditions between DeepLink providers (e.g., AppsFlyer) and clipboard fallback.
+- **P0: Android 12+ Zero-Toast Optimization**: Leverages `ClipDescription.timestamp` and SHA-256 content hash comparison to completely eliminate annoying "Pasted from clipboard" toasts when switching between apps or foregrounding.
+- **P1: iOS 14+ `detectPatterns([.probableWebURL])`**: Inspects clipboard patterns without triggering the system paste alert. Ordinary copied text is silently ignored; permission prompts are only triggered when an actual Web URL is copied.
+- **P2: First Launch Baseline Strategy**: Automatically establishes a baseline on fresh app installs (`ignoreFirstLaunch: true`), preventing newly installed apps from erroneously popping up unrelated historical clipboard text.
+- **Zero-Prompt Preflight (iOS & Android)**: Checks native metadata (`hasStrings`, `changeCount`, and MIME types) with zero intrusive permission banners.
+- **Safe Content Reading**: Computes content hash (SHA-256) and deduplicates reads (`isDuplicate`). Persists state so subsequent app launches remain silent.
+- **Clipboard Clearing**: Clear clipboard securely once links/content have been consumed.
+- **Race Condition Dispatcher Guide**: Production-ready template handling 3-second timeout race conditions between DeepLink providers (e.g. AppsFlyer) and clipboard fallback.
 
 ---
 
@@ -41,17 +43,25 @@ flutter pub get
 ```dart
 import 'package:smart_clipboard_link/smart_clipboard_link.dart';
 
-// 1. Silent preflight check (does NOT trigger iOS permission dialog)
-final status = await SmartClipboardLink.checkStatus();
+// 1. Silent preflight check (does NOT trigger iOS permission dialog or Android 12+ Toast)
+final status = await SmartClipboardLink.checkStatus(
+  ignoreFirstLaunch: true, // Baseline strategy: avoids reading historical clipboard on fresh install
+  onlyWebURL: true,        // Patterns check: only triggers for Web URLs, ignores plain text
+);
+
 if (!status.shouldRead) {
-  // Clipboard is empty or hasn't changed since last inspection
+  // Clipboard is empty, unchanged, not a URL, or ignored as first launch baseline
+  print('Skip reading. Reason: ${status.reason}');
   return;
 }
 
-// 2. Read content (triggers iOS permission alert only on newly copied content)
+// 2. Read content (triggers iOS permission alert / Android Toast only on new URL)
 final result = await SmartClipboardLink.readContent();
+if (result.content.isEmpty || result.isDuplicate) return;
+
 print('Content: ${result.content}');
 print('Change count: ${result.changeCount}');
+print('Content hash: ${result.contentHash}');
 
 // 3. Clear clipboard after consumption
 await SmartClipboardLink.clear();
@@ -106,10 +116,15 @@ class LinkDispatcher {
   }
 
   Future<void> _checkClipboard() async {
-    final status = await SmartClipboardLink.checkStatus();
+    final status = await SmartClipboardLink.checkStatus(
+      ignoreFirstLaunch: true,
+      onlyWebURL: true,
+    );
     if (!status.shouldRead) return;
 
     final result = await SmartClipboardLink.readContent();
+    if (result.content.isEmpty || result.isDuplicate) return;
+
     final linkId = _parseLinkId(result.content);
     if (linkId == null || linkId.isEmpty) return;
 

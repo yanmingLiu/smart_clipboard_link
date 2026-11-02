@@ -30,27 +30,42 @@ flutter pub get # 或 fvm flutter pub get
 
 ## 二、插件 API 速查
 
-插件本身职责纯粹，仅暴露底层的无感预检、读取、记录与清理能力：
+插件本身职责纯粹，仅暴露底层的无感预检、安全读取、白名单校验、记录与清理能力：
 
 ```dart
 import 'package:smart_clipboard_link/smart_clipboard_link.dart';
 
-// 1. 无感预检（iOS 不弹窗）：检查是否有新复制的文本
-final status = await SmartClipboardLink.checkStatus();
+// 1. 无感预检（iOS 不弹窗，Android 12+ 不触发 Toast，支持基线忽略、URL 过滤、时效 TTL 与防抖）
+final status = await SmartClipboardLink.checkStatus(
+  ignoreFirstLaunch: true, // 启用首次启动基线忽略策略，避免新装误弹历史无关剪切板
+  onlyWebURL: true,        // 仅 Web URL 时触发，普通文本不弹窗，极致隐私体验
+  maxAge: const Duration(hours: 2), // 剪切板 TTL 最大时效，超过则视为陈旧数据丢弃
+  cooldown: const Duration(milliseconds: 1500), // 高频切前台防抖冷却
+);
+
 if (!status.shouldRead) {
-  // empty（为空）或 unchanged（未发生新复制），直接 return
+  // empty（为空）/ unchanged（未变）/ firstLaunchIgnored（首启基线）/ nonUrl（非链接）/ expired（过期）/ throttled（防抖中）
+  print('无需读取，原因: ${status.reason}');
   return;
 }
 
-// 2. 确认有新复制后读取（此时 iOS 会触发系统授权提示）
-// 读取成功后原生会自动记录当前 changeCount，冷热启动不再弹窗
-final result = await SmartClipboardLink.readContent();
+// 2. 确认有新 URL 后读取，支持配置业务域名或前缀白名单
+final result = await SmartClipboardLink.readContent(
+  allowedDomains: ['example.com', 'link.example.com'], // 域名白名单过滤
+  urlPrefixes: ['https://link.example.com/s/'],        // 前缀过滤
+);
+
+if (result.content.isEmpty || result.isDuplicate || !result.matchesPattern) {
+  return;
+}
+
 print('读取到内容: ${result.content}');
+print('内容哈希: ${result.contentHash}');
 
 // 3. 业务完成承接后清空剪切板
 await SmartClipboardLink.clear();
 
-// 4. 手动记录 changeCount（如用户拒绝授权时）
+// 4. 手动记录状态（如用户拒绝授权时）
 await SmartClipboardLink.recordChangeCount();
 ```
 
@@ -119,13 +134,16 @@ class LinkDispatcher {
   }
 
   Future<void> _checkClipboard() async {
-    // 无感检测（不触发 iOS 授权提示）
-    final status = await SmartClipboardLink.checkStatus();
+    // 无感检测（不触发 iOS 授权提示，Android 12+ 不触发 Toast，过滤非 URL 与首启基线）
+    final status = await SmartClipboardLink.checkStatus(
+      ignoreFirstLaunch: true,
+      onlyWebURL: true,
+    );
     if (!status.shouldRead) return;
 
     // 触发读取
     final result = await SmartClipboardLink.readContent();
-    if (result.content.isEmpty) return;
+    if (result.content.isEmpty || result.isDuplicate) return;
 
     final linkId = linkIdParser != null
         ? linkIdParser!(result.content)

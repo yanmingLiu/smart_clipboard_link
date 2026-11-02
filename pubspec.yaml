@@ -1,6 +1,6 @@
 name: smart_clipboard_link
 description: A privacy-first Flutter clipboard plugin that prevents iOS 14/16+ paste prompts using hasStrings and changeCount, with safe reading and clearing support.
-version: 0.0.1
+version: 0.0.2
 homepage: https://github.com/yanmingLiu/smart_clipboard_link
 repository: https://github.com/yanmingLiu/smart_clipboard_link
 issue_tracker: https://github.com/yanmingLiu/smart_clipboard_link/issues
