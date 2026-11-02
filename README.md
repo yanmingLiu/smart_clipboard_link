@@ -1,52 +1,67 @@
 # smart_clipboard_link
 
-一个专为 iOS 隐私权限（iOS 14 / 16+）优化的无感知剪切板检测与管理 Flutter 插件。
+A privacy-focused Flutter clipboard plugin designed to eliminate intrusive iOS 14 / 16+ "Paste from Clipboard" system permission dialogs by utilizing native metadata (`hasStrings` and `changeCount`).
+
+[![pub package](https://img.shields.io/pub/v/smart_clipboard_link.svg)](https://pub.dev/packages/smart_clipboard_link)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+[English](README.md) | [中文说明](README_CN.md)
 
 ---
 
-## 一、核心特性与设计哲学
+## Features
 
-在 iOS 14 / 16+ 之后，随意调用读取剪切板 API 会频繁弹出“允许粘贴”系统授权对话框或系统横幅，严重损害用户体验。
-
-本插件遵循**单一职责原则**，专注解决原生剪切板的无感检测与清理：
-1. **零权限弹窗预检（`checkStatus`）**：
-   - 依赖 iOS 原生 `UIPasteboard.general.hasStrings` 过滤空文本（**无弹窗**）。
-   - 依赖 `UIPasteboard.general.changeCount` 对比本地 `lastChangeCount`（**无弹窗**）。
-   - 只有用户在外部产生**新的复制动作**时，`shouldRead` 才会返回 `true`。
-2. **安全读取与自动记录（`readContent`）**：
-   - 仅在确认有新复制时由业务层按需触发，读取后原生内部自动持久化记录本次 `changeCount`，冷热启动不重复弹窗。
-3. **安全清理（`clear`）**：
-   - 支持业务承接成功后直接清空剪切板。
+- **Zero-Prompt Preflight (iOS)**: Checks `UIPasteboard.general.hasStrings` and `changeCount` without triggering any iOS privacy authorization alerts.
+- **Safe Reading**: Prompts user permission only when a new copy action is detected outside the app. Automatically persists the `changeCount` so subsequent launches remain prompt-free.
+- **Clipboard Clearing**: Clear clipboard securely once links/content have been consumed by landing pages.
+- **Single Responsibility**: Lightweight, clean architecture without third-party deep-link SDK dependencies.
+- **Race Condition Dispatcher Guide**: Ready-to-use business template for handling 3-second timeout race conditions between DeepLink providers (e.g., AppsFlyer) and clipboard fallback.
 
 ---
 
-## 二、基础 API
+## Installation
+
+Add to your `pubspec.yaml`:
+
+```yaml
+dependencies:
+  smart_clipboard_link: ^0.0.1
+```
+
+Then run:
+
+```bash
+flutter pub get
+```
+
+---
+
+## Basic Usage
 
 ```dart
 import 'package:smart_clipboard_link/smart_clipboard_link.dart';
 
-// 1. 无感预检（不触发 iOS 授权弹窗）
+// 1. Silent preflight check (does NOT trigger iOS permission dialog)
 final status = await SmartClipboardLink.checkStatus();
 if (!status.shouldRead) {
-  // 剪切板为空，或该次复制之前已处理/已拒绝过，直接 return
+  // Clipboard is empty or hasn't changed since last inspection
   return;
 }
 
-// 2. 确认有新内容后读取（此时 iOS 触发授权提示）
+// 2. Read content (triggers iOS permission alert only on newly copied content)
 final result = await SmartClipboardLink.readContent();
-print('内容: ${result.content}, changeCount: ${result.changeCount}');
+print('Content: ${result.content}');
+print('Change count: ${result.changeCount}');
 
-// 3. 业务使用完成后清空剪切板
+// 3. Clear clipboard after consumption
 await SmartClipboardLink.clear();
 ```
 
 ---
 
-## 三、业务最佳实践：结合深链（如 AppsFlyer）实现 3 秒竞态与兜底
+## Recommended Architecture: 3-Second DeepLink vs Clipboard Race Condition
 
-因为深链 SDK（如 AppsFlyer、Firebase Dynamic Links）和承接页路由逻辑属于具体业务层，建议在宿主 App 业务层封装调度器（Coordinator）。
-
-以下为推荐的业务层实现模板：
+DeepLink SDKs (such as AppsFlyer, Firebase Dynamic Links) and navigation routers (GetX, GoRouter, Navigator) belong to the application layer. Below is the standard production-ready dispatcher template to orchestrate 3-second race conditions and page replacement:
 
 ```dart
 import 'dart:async';
@@ -66,21 +81,21 @@ class LinkDispatcher {
   String? _currentDisplayLinkId;
   LinkSource? _currentDisplaySource;
 
-  /// 冷启动或前台唤醒时调用
+  /// Call on cold launch or when resuming from background
   Future<void> onAppLaunchOrForeground() async {
     _isRaceWindowClosed = false;
     _pendingDeepLinkId = null;
     _pendingClipboardLinkId = null;
 
-    // 开启 3 秒竞争窗口
+    // Start 3-second window
     _raceTimer?.cancel();
     _raceTimer = Timer(const Duration(seconds: 3), _onRaceTimeout);
 
-    // 检查剪切板
+    // Asynchronously preflight clipboard
     await _checkClipboard();
   }
 
-  /// 业务层收到深链回调时调用（如 AppsFlyer onDeepLinking）
+  /// Call when deep link arrives (e.g. AppsFlyer onDeepLinking)
   void onDeepLinkReceived(String deepLinkId) {
     if (_isRaceWindowClosed) {
       _handleLateDeepLink(deepLinkId);
@@ -91,11 +106,9 @@ class LinkDispatcher {
   }
 
   Future<void> _checkClipboard() async {
-    // 1. 无感检测
     final status = await SmartClipboardLink.checkStatus();
     if (!status.shouldRead) return;
 
-    // 2. 读取文本
     final result = await SmartClipboardLink.readContent();
     final linkId = _parseLinkId(result.content);
     if (linkId == null || linkId.isEmpty) return;
@@ -115,10 +128,10 @@ class LinkDispatcher {
       final clipId = _pendingClipboardLinkId;
 
       if (clipId != null && clipId == deepId) {
-        // ID 相同，优先展示先返回结果的
+        // Same ID: prioritize the first returned result without duplication
         _openLandingPage(deepId, LinkSource.deepLink);
       } else {
-        // ID 不同或剪切板无效，深链优先
+        // Different ID: DeepLink wins, clear clipboard upon success
         _openLandingPage(deepId, LinkSource.deepLink, onSuccess: () {
           if (clipId != null) SmartClipboardLink.clear();
         });
@@ -130,7 +143,7 @@ class LinkDispatcher {
     _isRaceWindowClosed = true;
     final clipId = _pendingClipboardLinkId;
     if (clipId != null && clipId.isNotEmpty) {
-      // 3秒深链未到达，剪切板兜底
+      // DeepLink timed out: fallback to clipboard
       _openLandingPage(clipId, LinkSource.clipboard, onSuccess: () {
         SmartClipboardLink.clear();
       });
@@ -140,7 +153,7 @@ class LinkDispatcher {
   void _handleLateDeepLink(String deepLinkId) {
     if (_currentDisplayLinkId == deepLinkId) return;
 
-    // 若当前正在展示剪切板兜底页，深链强制覆盖并关闭旧承接页
+    // Override and close clipboard landing page if different
     if (_currentDisplaySource == LinkSource.clipboard) {
       _closeLandingPage();
       _openLandingPage(deepLinkId, LinkSource.deepLink, onSuccess: () {
@@ -154,18 +167,22 @@ class LinkDispatcher {
   void _openLandingPage(String linkId, LinkSource source, {VoidCallback? onSuccess}) {
     _currentDisplayLinkId = linkId;
     _currentDisplaySource = source;
-    // 调用项目实际路由进行跳转，并在展示成功后触发 onSuccess
-    // AppRouter.openLandingPage(linkId).then((ok) { if (ok) onSuccess?.call(); });
+    // Route to landing page and invoke onSuccess() upon completion
   }
 
   void _closeLandingPage() {
-    // 关闭当前正在展示的承接页
+    // Pop/dismiss current landing page
   }
 
   String? _parseLinkId(String text) {
-    // 正则提取 link_id
     final uri = Uri.tryParse(text);
     return uri?.pathSegments.lastOrNull;
   }
 }
 ```
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
